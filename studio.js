@@ -117,19 +117,6 @@
   });
   // The inquiry form's submit action is handled once, in studio-extras.js.
 
-  const zoomInput = document.getElementById('universe-zoom');
-  const zoomOutput = document.getElementById('universe-zoom-output');
-  const resetView = document.querySelector('[data-universe-action="camera-reset"]');
-  zoomInput?.addEventListener('input', () => {
-    const factor = Number(zoomInput.value) / 100;
-    if (zoomOutput) zoomOutput.textContent = `${factor.toFixed(1)}×`;
-    zoomInput.setAttribute('aria-valuetext', `${factor.toFixed(1)}×`);
-  });
-  resetView?.addEventListener('click', () => {
-    if (zoomInput) zoomInput.value = '100';
-    if (zoomOutput) zoomOutput.textContent = '1.0×';
-  });
-
   const year = document.getElementById('year');
   if (year && !year.textContent) year.textContent = String(new Date().getFullYear());
 })();
