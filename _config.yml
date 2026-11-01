@@ -1,0 +1,6 @@
+# ORBIT is a plain static HTML/CSS/JavaScript website. No Jekyll plugins are needed.
+plugins: []
+exclude:
+  - node_modules
+  - .git
+  - .github

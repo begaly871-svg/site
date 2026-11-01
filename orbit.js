@@ -19,11 +19,16 @@
   const timer = document.getElementById('universe-time');
   const coordinates = document.getElementById('universe-coordinate');
   const cursor = document.getElementById('universe-cursor');
+  const spaceCanvas = document.getElementById('cosmic-background');
   const status = document.getElementById('universe-status-text');
   const planetCounter = document.getElementById('planet-count');
   const toast = document.getElementById('universe-toast');
   const speedInput = document.getElementById('universe-speed');
   const speedOutput = document.getElementById('universe-speed-output');
+  const zoomInput = document.getElementById('universe-zoom');
+  const zoomOutput = document.getElementById('universe-zoom-output');
+  const soundButton = document.getElementById('universe-sound');
+  const volumeInput = document.getElementById('orbit-volume');
   const pauseButton = document.querySelector('[data-universe-action="toggle"]');
   const pauseLabel = document.querySelector('.sim-toggle-label');
   const pauseIcon = document.querySelector('.sim-play-icon');
@@ -41,23 +46,35 @@
     };
   })();
   const orbits = [
-    { name: 'MERCURY', radius: .17, size: 3.2, color: '#c1ae90', angle: .55, mass: .000012 },
-    { name: 'VENUS', radius: .255, size: 4.8, color: '#edbd7c', angle: 3.55, mass: .000045 },
-    { name: 'EARTH', radius: .35, size: 5.4, color: '#69dcff', angle: 2.2, mass: .00006 },
-    { name: 'MARS', radius: .455, size: 4.2, color: '#ff886c', angle: 5.0, mass: .000035 },
-    { name: 'JUPITER', radius: .57, size: 7.4, color: '#d8b78c', angle: 1.45, mass: .00055 }
+    { name: 'MERCURY', radius: .17, size: 3.2, color: '#c1ae90', angle: .55, mass: .00018 },
+    { name: 'VENUS', radius: .255, size: 4.8, color: '#edbd7c', angle: 3.55, mass: .00042 },
+    { name: 'EARTH', radius: .35, size: 5.4, color: '#69dcff', angle: 2.2, mass: .00055 },
+    { name: 'MARS', radius: .455, size: 4.2, color: '#ff886c', angle: 5.0, mass: .00032 },
+    { name: 'JUPITER', radius: .57, size: 7.4, color: '#d8b78c', angle: 1.45, mass: .0042 }
   ];
 
   let width = 0;
   let height = 0;
+  let spaceWidth = 0;
+  let spaceHeight = 0;
+  let spaceStars = [];
   let stars = [];
   let elapsed = 0;
-  let speed = Number(speedInput?.value || 42) / 42;
+  let speed = Number(speedInput?.value || 62) / 42;
+  let zoom = Number(zoomInput?.value || 100) / 100;
+  let soundEnabled = false;
+  let audio = null;
+  let volumeLevel = Number(volumeInput?.value || 24) / 100;
+  let ambient = null;
+  let lastPointerSound = 0;
   let running = true;
   let previous = 0;
   let pointer = null;
   let toastTimer = 0;
   let frame = 0;
+  let pan = { x: 0, y: 0 };
+  let drag = null;
+  let wasDragging = false;
 
   const announce = message => {
     if (!toast) return;
@@ -67,11 +84,103 @@
     toastTimer = window.setTimeout(() => toast.classList.remove('show'), 1800);
   };
 
+  const playNote = (frequency = 440, duration = .12, type = 'sine', volume = .04) => {
+    if (!soundEnabled) return;
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      audio ||= new AudioContext();
+      if (audio.state === 'suspended') void audio.resume();
+      const oscillator = audio.createOscillator();
+      const gain = audio.createGain();
+      const start = audio.currentTime;
+      volume *= volumeLevel;
+      if (volume < .0001) return;
+      oscillator.type = type;
+      oscillator.frequency.setValueAtTime(frequency, start);
+      gain.gain.setValueAtTime(.0001, start);
+      gain.gain.exponentialRampToValueAtTime(volume, start + .022);
+      gain.gain.exponentialRampToValueAtTime(.0001, start + duration);
+      oscillator.connect(gain);
+      gain.connect(audio.destination);
+      oscillator.start(start);
+      oscillator.stop(start + duration + .025);
+    } catch {
+      // Browsers may block audio; the simulation stays fully usable without it.
+    }
+  };
+
+  const startAmbience = () => {
+    if (!soundEnabled || !audio) return;
+    try {
+      if (ambient) {
+        ambient.output.gain.setTargetAtTime(.12 * volumeLevel, audio.currentTime, .65);
+        return;
+      }
+      const filter = audio.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 480;
+      const output = audio.createGain();
+      output.gain.setValueAtTime(.0001, audio.currentTime);
+      filter.connect(output);
+      output.connect(audio.destination);
+      const oscillators = [65.41, 98, 130.81].map((frequency, index) => {
+        const oscillator = audio.createOscillator();
+        const voice = audio.createGain();
+        oscillator.type = index === 1 ? 'triangle' : 'sine';
+        oscillator.frequency.value = frequency;
+        voice.gain.value = index === 2 ? .018 : .027;
+        oscillator.connect(voice);
+        voice.connect(filter);
+        oscillator.start();
+        return oscillator;
+      });
+      ambient = { oscillators, output };
+      output.gain.setTargetAtTime(.12 * volumeLevel, audio.currentTime, .9);
+    } catch {
+      ambient = null;
+    }
+  };
+
+  const stopAmbience = () => {
+    if (!ambient || !audio) return;
+    const previousAmbient = ambient;
+    ambient = null;
+    previousAmbient.output.gain.setTargetAtTime(.0001, audio.currentTime, .1);
+    window.setTimeout(() => {
+      previousAmbient.oscillators.forEach(oscillator => { try { oscillator.stop(); } catch { } });
+    }, 850);
+  };
+
+  const resizeSpace = () => {
+    if (!spaceCanvas) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    spaceWidth = window.innerWidth;
+    spaceHeight = window.innerHeight;
+    spaceCanvas.width = Math.max(1, Math.round(spaceWidth * dpr));
+    spaceCanvas.height = Math.max(1, Math.round(spaceHeight * dpr));
+    const spaceContext = spaceCanvas.getContext('2d');
+    if (!spaceContext) return;
+    spaceContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    let seed = 712931;
+    const random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    spaceStars = Array.from({ length: Math.min(480, Math.max(160, Math.round(spaceWidth * spaceHeight / 4300))) }, () => ({
+      x: random() * spaceWidth,
+      y: random() * spaceHeight,
+      r: .3 + random() * .56,
+      alpha: .09 + random() * .28,
+      phase: random() * Math.PI * 2
+    }));
+  };
+  resizeSpace();
+  window.addEventListener('resize', resizeSpace, { passive: true });
+
   const updateCount = () => {
     if (planetCounter) planetCounter.textContent = String(bodies.length + 1).padStart(2, '0');
   };
 
   const resize = () => {
+    resizeSpace();
     const rect = stage.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -135,9 +244,9 @@
       const dx = other.x - body.x;
       const dy = other.y - body.y;
       const squared = dx * dx + dy * dy;
-      if (squared < .0025) continue;
+      if (squared < .0001) continue;
       const distance = Math.sqrt(squared);
-      const force = other.mass / (squared + .003);
+      const force = other.mass / (squared + .00025);
       ax += force * dx / distance;
       ay += force * dy / distance;
     }
@@ -158,8 +267,39 @@
   };
 
   const advance = dt => {
-    const step = dt * speed * (reduceMotion.matches ? .2 : 1);
+    const multiplier = reduceMotion.matches ? .2 : 1;
+    const step = dt * speed * multiplier;
     if (step <= 0) return;
+    const events = [];
+    const existingCount = bodies.length;
+    for (let a = 0; a < existingCount; a++) {
+      for (let b = a + 1; b < existingCount; b++) {
+        const first = bodies[a];
+        const second = bodies[b];
+        if (first.mass + second.mass > .008) continue;
+        if (Math.hypot(first.x - second.x, first.y - second.y) < .054) events.push({ kind: 'merge', first, second });
+      }
+    }
+    const merged = new Set();
+    for (const contact of events) {
+      if (merged.has(contact.first) || merged.has(contact.second)) continue;
+      const totalMass = contact.first.mass + contact.second.mass;
+      contact.first.x = (contact.first.x * contact.first.mass + contact.second.x * contact.second.mass) / totalMass;
+      contact.first.y = (contact.first.y * contact.first.mass + contact.second.y * contact.second.mass) / totalMass;
+      contact.first.vx = (contact.first.vx * contact.first.mass + contact.second.vx * contact.second.mass) / totalMass;
+      contact.first.vy = (contact.first.vy * contact.first.mass + contact.second.vy * contact.second.mass) / totalMass;
+      contact.first.mass = totalMass;
+      contact.first.size = Math.min(12, Math.hypot(contact.first.size, contact.second.size));
+      contact.first.radius = Math.hypot(contact.first.x, contact.first.y);
+      contact.first.trail.length = 0;
+      const removedIndex = bodies.indexOf(contact.second);
+      if (removedIndex !== -1) bodies.splice(removedIndex, 1);
+      merged.add(contact.first);
+      merged.add(contact.second);
+      updateCount();
+      announce('ПЛАНЕТЫ СТОЛКНУЛИСЬ · ТЕЛА ОБЪЕДИНИЛИСЬ');
+      playNote(125, .3, 'triangle', .02);
+    }
     for (const body of bodies) {
       const first = acceleration(body);
       body.vx += first.ax * step * .5;
@@ -267,6 +407,21 @@
     ctx.fillStyle = background;
     ctx.fillRect(0, 0, width, height);
 
+    if (spaceCanvas && spaceWidth > 0 && spaceHeight > 0) {
+      const spaceContext = spaceCanvas.getContext('2d');
+      if (spaceContext) {
+        spaceContext.clearRect(0, 0, spaceWidth, spaceHeight);
+        for (const star of spaceStars) {
+          spaceContext.globalAlpha = star.alpha * (.72 + .28 * Math.sin(timestamp * .00022 + star.phase));
+          spaceContext.fillStyle = '#e6efd5';
+          spaceContext.beginPath();
+          spaceContext.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+          spaceContext.fill();
+        }
+        spaceContext.globalAlpha = 1;
+      }
+    }
+
     for (const star of stars) {
       ctx.beginPath();
       ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2);
@@ -274,10 +429,10 @@
       ctx.fill();
     }
 
-    const centerX = width * .5;
-    const centerY = height * .52;
-    const orbitX = Math.min(width * .44, height * .62);
-    const orbitY = Math.min(height * .42, width * .17);
+    const centerX = width * .5 + pan.x;
+    const centerY = height * .52 + pan.y;
+    const orbitX = Math.min(width * .44, height * .62) * zoom;
+    const orbitY = Math.min(height * .42, width * .17) * zoom;
     for (const body of bodies) {
       ctx.beginPath();
       ctx.ellipse(centerX, centerY, orbitX * body.radius / .83, orbitY * body.radius / .58, 0, 0, Math.PI * 2);
@@ -333,24 +488,23 @@
     frame = requestAnimationFrame(render);
   };
 
-  const addPlanet = position => {
+  const addPlanet = (position, options = {}) => {
     if (bodies.length >= 17) {
       announce('ДОСТИГНУТ ЛИМИТ СИСТЕМЫ');
       return;
     }
     const index = bodies.length - orbits.length;
-    const closest = bodies.reduce((distance, body) => Math.min(distance, body.radius), .83);
-    const radius = Math.min(.83, closest + .125 + Math.max(0, index) * .01);
+    const radius = options.radius ?? Math.min(.83, bodies.reduce((distance, body) => Math.min(distance, body.radius), .83) + .125 + Math.max(0, index) * .01);
     let angle = rand() * Math.PI * 2;
     if (position && width > 0 && height > 0) {
-      angle = Math.atan2((position.y - height * .52) / Math.max(height * .42, 1), (position.x - width * .5) / Math.max(width * .44, 1));
+      angle = Math.atan2((position.y - height * .52 - pan.y) / Math.max(height * .42 * zoom, 1), (position.x - width * .5 - pan.x) / Math.max(width * .44 * zoom, 1));
     }
     const velocity = Math.sqrt(mu / radius);
     bodies.push({
       name: `BODY ${String(index + 1).padStart(2, '0')}`,
       radius,
       size: 3.2 + rand() * 2.3,
-      mass: .000012 + rand() * .000022,
+      mass: .00009 + rand() * .00018,
       color: colors[(Math.max(0, index) + 1) % colors.length],
       x: Math.cos(angle) * radius,
       y: Math.sin(angle) * radius,
@@ -359,24 +513,52 @@
       trail: []
     });
     updateCount();
-    announce('НОВАЯ ПЛАНЕТА ДОБАВЛЕНА');
+    if (options.announce !== false) announce('НОВАЯ ПЛАНЕТА ДОБАВЛЕНА');
+    if (options.sound !== false) playNote(options.frequency ?? 660, .15, 'sine', .018);
+    return bodies[bodies.length - 1];
   };
 
   reset();
   resize();
-  if ('ResizeObserver' in window) new ResizeObserver(resize).observe(stage);
+  window.setTimeout(resize, 120);
+  window.setTimeout(resize, 600);
+  if (typeof ResizeObserver === 'function') {
+    const observer = new ResizeObserver(() => resize());
+    observer.observe(stage);
+    observer.observe(consolePanel);
+  } else {
+    window.addEventListener('resize', resize, { passive: true });
+  }
   window.addEventListener('resize', resize, { passive: true });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       previous = 0;
       resize();
+    } else {
+      stopAmbience();
     }
   });
 
+  let skipNextCameraClick = false;
+  stage.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.target.closest('button, input, a')) return;
+    drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, startX: pan.x, startY: pan.y };
+    wasDragging = false;
+  });
   stage.addEventListener('pointermove', event => {
-    if (event.pointerType === 'touch') return;
+    if (event.pointerType === 'touch' && !drag) return;
     const rect = stage.getBoundingClientRect();
     pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    if (drag && drag.pointerId === event.pointerId && (event.buttons & 1)) {
+      const dx = event.clientX - drag.x;
+      const dy = event.clientY - drag.y;
+      if (Math.hypot(dx, dy) > 5) {
+        wasDragging = true;
+        pan.x = Math.max(-width * .38, Math.min(width * .38, drag.startX + dx));
+        pan.y = Math.max(-height * .32, Math.min(height * .32, drag.startY + dy));
+        stage.classList.add('is-camera-dragging');
+      }
+    }
     stage.classList.add('is-pointer');
     if (cursor) {
       cursor.style.left = `${pointer.x}px`;
@@ -384,12 +566,38 @@
     }
     if (coordinates) coordinates.textContent = `X ${Math.round(pointer.x)} · Y ${Math.round(pointer.y)} · FIELD ACTIVE`;
   }, { passive: true });
+  stage.addEventListener('pointerup', event => {
+    if (drag?.pointerId !== event.pointerId) return;
+    drag = null;
+    stage.classList.remove('is-camera-dragging');
+    if (wasDragging) {
+      skipNextCameraClick = true;
+      window.setTimeout(() => { wasDragging = false; skipNextCameraClick = false; }, 450);
+    }
+  });
+  stage.addEventListener('pointercancel', () => {
+    drag = null;
+    wasDragging = false;
+    stage.classList.remove('is-camera-dragging');
+  });
   stage.addEventListener('pointerleave', () => {
     pointer = null;
-    stage.classList.remove('is-pointer');
+    drag = null;
+    stage.classList.remove('is-pointer', 'is-camera-dragging');
     if (coordinates) coordinates.textContent = 'SYSTEM ONLINE · GRAVITY ACTIVE';
   });
+  stage.addEventListener('wheel', event => {
+    event.preventDefault();
+    zoom = Math.max(.7, Math.min(1.45, zoom - Math.sign(event.deltaY) * .055));
+    if (zoomInput) zoomInput.value = String(Math.round(zoom * 100));
+    if (zoomOutput) zoomOutput.textContent = `${zoom.toFixed(1)}×`;
+    zoomInput?.setAttribute('aria-valuetext', `${zoom.toFixed(1)}×`);
+  }, { passive: false });
   canvas.addEventListener('click', event => {
+    if (wasDragging || skipNextCameraClick) {
+      skipNextCameraClick = false;
+      return;
+    }
     const rect = stage.getBoundingClientRect();
     addPlanet({ x: event.clientX - rect.left, y: event.clientY - rect.top });
   });
@@ -401,6 +609,53 @@
   });
 
   document.querySelector('[data-universe-action="add"]')?.addEventListener('click', () => addPlanet());
+  soundButton?.addEventListener('click', () => {
+    soundEnabled = !soundEnabled;
+    soundButton.setAttribute('aria-pressed', String(soundEnabled));
+    soundButton.setAttribute('aria-label', soundEnabled ? 'Выключить оригинальные звуковые эффекты' : 'Включить оригинальные звуковые эффекты');
+    soundButton.title = soundEnabled ? 'Отключить оригинальные звуковые эффекты' : 'Включить оригинальные звуковые эффекты';
+    const label = soundButton.querySelector('.universe-sound-label');
+    if (label) label.textContent = soundEnabled ? 'ЗВУК ВКЛ' : 'ЗВУК ВЫКЛ';
+    soundButton.classList.toggle('sound-enabled', soundEnabled);
+    if (soundEnabled) {
+      if (!audio) { const AudioContext = window.AudioContext || window.webkitAudioContext; if (AudioContext) audio = new AudioContext(); }
+      if (audio?.state === 'suspended') void audio.resume();
+      startAmbience();
+      playNote(523.25, .19, 'sine', .025);
+    } else {
+      stopAmbience();
+    }
+    if (status) status.textContent = soundEnabled ? 'ГРАВИТАЦИЯ · ОРИГИНАЛЬНЫЙ ЗВУК ВКЛЮЧЕН' : 'ГРАВИТАЦИОННОЕ ПОЛЕ АКТИВНО';
+  });
+  volumeInput?.addEventListener('input', () => {
+    volumeLevel = Number(volumeInput.value) / 100;
+    if (!volumeLevel) stopAmbience();
+    else if (soundEnabled) startAmbience();
+  });
+  speedInput?.addEventListener('input', () => {
+    speed = Number(speedInput.value) / 42;
+    if (speedOutput) speedOutput.textContent = `${speed.toFixed(1)}×`;
+    speedInput.setAttribute('aria-valuetext', `${speed.toFixed(1)}×`);
+    const progress = (Number(speedInput.value) - Number(speedInput.min)) / (Number(speedInput.max) - Number(speedInput.min)) * 100;
+    speedInput.style.background = `linear-gradient(90deg, var(--acid) ${progress}%, #ffffff24 ${progress}%)`;
+  });
+  zoomInput?.addEventListener('input', () => {
+    zoom = Number(zoomInput.value) / 100;
+    if (zoomOutput) zoomOutput.textContent = `${zoom.toFixed(1)}×`;
+    zoomInput.setAttribute('aria-valuetext', `${zoom.toFixed(1)}×`);
+    const progress = (Number(zoomInput.value) - Number(zoomInput.min)) / (Number(zoomInput.max) - Number(zoomInput.min)) * 100;
+    zoomInput.style.background = `linear-gradient(90deg, var(--acid) ${progress}%, #ffffff24 ${progress}%)`;
+  });
+  document.querySelector('[data-universe-action="camera-reset"]')?.addEventListener('click', () => {
+    pan = { x: 0, y: 0 };
+    zoom = 1;
+    if (zoomInput) zoomInput.value = '100';
+    if (zoomOutput) zoomOutput.textContent = '1.0×';
+    if (zoomInput) zoomInput.style.background = 'linear-gradient(90deg, var(--acid) 40%, #ffffff24 40%)';
+    previous = 0;
+    announce('ОБЗОР СИСТЕМЫ СБРОШЕН');
+    playNote(392, .11, 'sine', .009);
+  });
   pauseButton?.addEventListener('click', () => {
     running = !running;
     if (pauseButton.firstElementChild) pauseButton.firstElementChild.textContent = running ? 'Ⅱ' : '▶';
@@ -412,6 +667,10 @@
   });
   document.querySelector('[data-universe-action="reset"]')?.addEventListener('click', () => {
     running = true;
+    pan = { x: 0, y: 0 };
+    zoom = 1;
+    if (zoomInput) zoomInput.value = '100';
+    if (zoomOutput) zoomOutput.textContent = '1.0×';
     pauseButton?.classList.remove('is-paused');
     if (pauseIcon) pauseIcon.textContent = 'Ⅱ';
     if (pauseLabel) pauseLabel.textContent = 'ПАУЗА';
@@ -419,14 +678,6 @@
     consolePanel?.classList.remove('is-paused');
     reset(true);
     previous = 0;
-  });
-
-  speedInput?.addEventListener('input', () => {
-    speed = Number(speedInput.value) / 42;
-    if (speedOutput) speedOutput.textContent = `${speed.toFixed(1)}×`;
-    speedInput.setAttribute('aria-valuetext', `${speed.toFixed(1)}×`);
-    const progress = (Number(speedInput.value) - Number(speedInput.min)) / (Number(speedInput.max) - Number(speedInput.min)) * 100;
-    speedInput.style.background = `linear-gradient(90deg, var(--acid) ${progress}%, #ffffff24 ${progress}%)`;
   });
 
   fullscreenButton?.addEventListener('click', async () => {
